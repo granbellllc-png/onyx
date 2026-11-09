@@ -23,6 +23,9 @@ Agent flags and node requirements: microvm/README.md.
   copy in its own namespace.
 - Only api_server pods reach the agent listener (NetworkPolicy below). Agent
   pods may reach the sandbox-proxy port (sandbox-proxy/networkpolicy.yaml).
+- craft.hostAgent.metrics.enabled adds a plain HTTP /metrics port
+  (--metrics-listen); the ServiceMonitor is in
+  craft-fc-host-agent-servicemonitor.yaml.
 */}}
 {{- $craft := .Values.craft | default dict }}
 {{- if eq (include "onyx.craftSandboxRuntime" .) "firecracker" }}
@@ -63,6 +66,8 @@ Agent flags and node requirements: microvm/README.md.
 {{- $nodeSelector = merge (dict "onyx.app/kvm" "true") (deepCopy (index $sandboxPod "nodeSelector" | default (dict "onyx.app/workload" "sandbox"))) }}
 {{- end }}
 {{- $tolerations := $agent.tolerations | default (index $sandboxPod "tolerations") | default (list (dict "key" "workload" "operator" "Equal" "value" "sandbox" "effect" "NoSchedule")) }}
+{{- $metrics := $agent.metrics | default dict }}
+{{- $metricsPort := $metrics.port | default 9464 }}
 {{- if ne (toString $agent.createNamespace) "false" }}
 apiVersion: v1
 kind: Namespace
@@ -153,6 +158,9 @@ spec:
             - --relay-max-conns={{ $agent.relayMaxConns | default 256 | int64 }}
             - --egress-proxy={{ include "onyx.sandboxProxyHost" . }}:{{ include "onyx.sandboxProxyPort" . }}
             - --api-server-url={{ $agent.apiServerUrl | default (include "onyx.sandboxApiUrl" .) }}
+            {{- if $metrics.enabled }}
+            - --metrics-listen=:{{ $metricsPort }}
+            {{- end }}
             {{- range $agent.extraArgs }}
             - {{ . | quote }}
             {{- end }}
@@ -170,6 +178,11 @@ spec:
             - name: agent
               containerPort: {{ $port }}
               protocol: TCP
+            {{- if $metrics.enabled }}
+            - name: metrics
+              containerPort: {{ $metricsPort }}
+              protocol: TCP
+            {{- end }}
           # The listener opens only after VM recovery, so readiness means the
           # agent serves the API.
           readinessProbe:
@@ -225,6 +238,12 @@ spec:
       port: {{ $port }}
       targetPort: agent
       protocol: TCP
+    {{- if $metrics.enabled }}
+    - name: metrics
+      port: {{ $metricsPort }}
+      targetPort: metrics
+      protocol: TCP
+    {{- end }}
 ---
 {{- /* Only api_server pods reach the agent listener. Egress is not limited:
 the agent calls the api_server, sandbox-proxy and DNS. */}}
@@ -253,4 +272,14 @@ spec:
       ports:
         - protocol: TCP
           port: {{ $port }}
+    {{- if $metrics.enabled }}
+    {{- /* No from: any source may scrape, unless networkPolicyFrom is set. */}}
+    - ports:
+        - protocol: TCP
+          port: {{ $metricsPort }}
+      {{- with $metrics.networkPolicyFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
 {{- end }}
