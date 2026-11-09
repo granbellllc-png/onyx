@@ -69,6 +69,7 @@ type flags struct {
 	clientSANs    string
 	dialMax       int
 	daemonPort    uint
+	advertise     string
 }
 
 func main() {
@@ -99,6 +100,7 @@ func main() {
 	flag.StringVar(&f.clientSANs, "client-allowed-sans", "", "comma-separated DNS or URI SANs; a client cert must have one (empty: any cert from --client-ca)")
 	flag.IntVar(&f.dialMax, "dial-max-streams", server.DefaultMaxDialsPerVM, "most open Dial streams per VM")
 	flag.UintVar(&f.daemonPort, "daemon-port", server.DefaultDaemonPort, "guest vsock port of the guest daemon (craft.sandboxd.v1.Sandboxd pass-through)")
+	flag.StringVar(&f.advertise, "advertise-address", "", "host:port the api_server dials for --listen, sent with the node key registration (default $POD_IP:<--listen port>)")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -132,6 +134,9 @@ func run(f flags, log *slog.Logger) error {
 		return err
 	}
 	if err := checkListen(f); err != nil {
+		return err
+	}
+	if f.advertise, err = advertiseAddress(f, os.Getenv("POD_IP")); err != nil {
 		return err
 	}
 	uids, err := jailer.NewUIDPool(uint32(f.uidBase), uint32(f.uidCount))
@@ -277,7 +282,10 @@ func setupEgress(ctx context.Context, f flags, m *agent.Manager, log *slog.Logge
 	if secret == "" {
 		return errors.New("--api-server-url needs $SANDBOX_NODE_REGISTRATION_SECRET")
 	}
-	g := &relay.Registrar{BaseURL: f.apiServerURL, Secret: secret, Signer: signer, Log: log}
+	if f.advertise == "" {
+		log.Warn("no --advertise-address and no $POD_IP: the registration has no agent address, so the api_server cannot place VMs here")
+	}
+	g := &relay.Registrar{BaseURL: f.apiServerURL, Secret: secret, Signer: signer, AgentAddress: f.advertise, Log: log}
 	go g.Run(ctx)
 	return nil
 }
@@ -338,6 +346,42 @@ func checkListen(f flags) error {
 		return fmt.Errorf("--dial-max-streams %d must be 1 or more", f.dialMax)
 	}
 	return nil
+}
+
+// advertiseAddress is the host:port of --listen that the api_server dials:
+// --advertise-address, else $POD_IP with the --listen port, else a specific
+// --listen host. Empty if there is no TCP listener or no usable host.
+func advertiseAddress(f flags, podIP string) (string, error) {
+	if f.listen == "" {
+		if f.advertise != "" {
+			return "", errors.New("--advertise-address needs --listen")
+		}
+		return "", nil
+	}
+	if f.advertise != "" {
+		host, port, err := net.SplitHostPort(f.advertise)
+		if err != nil || host == "" {
+			return "", fmt.Errorf("--advertise-address %q must be host:port", f.advertise)
+		}
+		if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
+			return "", fmt.Errorf("--advertise-address %q has a bad port", f.advertise)
+		}
+		return f.advertise, nil
+	}
+	host, port, err := net.SplitHostPort(f.listen)
+	if err != nil {
+		return "", fmt.Errorf("--listen %q: %w", f.listen, err)
+	}
+	if podIP != "" {
+		if net.ParseIP(podIP) == nil {
+			return "", fmt.Errorf("$POD_IP %q is not an IP address", podIP)
+		}
+		return net.JoinHostPort(podIP, port), nil
+	}
+	if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
+		return "", nil
+	}
+	return net.JoinHostPort(host, port), nil
 }
 
 func splitList(s string) []string {
