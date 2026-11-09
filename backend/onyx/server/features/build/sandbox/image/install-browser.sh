@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Update the version and both archive hashes together.
-version=157.0.8103.38
+# Override the version and archive checksum together for a different image.
+version=${CHROME_VERSION:-157.0.8103.38}
 case "$(dpkg --print-architecture)" in
   amd64)
     platform=linux64
@@ -14,6 +14,7 @@ case "$(dpkg --print-architecture)" in
     ;;
   *) echo 'Unsupported browser architecture' >&2; exit 1 ;;
 esac
+checksum=${CHROME_SHA256:-$checksum}
 
 curl --fail --silent --show-error --location --retry 3 \
   "https://storage.googleapis.com/chrome-for-testing-public/${version}/${platform}/chrome-${platform}.zip" \
