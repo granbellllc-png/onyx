@@ -19,6 +19,7 @@ import (
 
 	"github.com/onyx-dot-app/onyx/microvm/internal/guestd"
 	"github.com/onyx-dot-app/onyx/microvm/internal/guestd/execs"
+	"github.com/onyx-dot-app/onyx/microvm/internal/guestd/files"
 	"github.com/onyx-dot-app/onyx/microvm/internal/guestd/sysops"
 	"github.com/onyx-dot-app/onyx/microvm/internal/guestd/vsock"
 )
@@ -40,7 +41,20 @@ func main() {
 	outBudget := flag.Int64("output-budget", 256<<20, "output bytes kept by all executions; over it, ended ones lose their output first")
 	maxRunning := flag.Int("max-running", 64, "most running executions")
 	logLevel := flag.String("log-level", "info", "debug, info, warn or error")
+	var fc files.Config
+	flag.StringVar(&fc.SessionsRoot, "sessions-root", files.DefaultSessionsRoot, "directory with one directory per session (file calls, capture, restore)")
+	readLinks := flag.String("read-link-roots", "/workspace/managed", "comma-separated directories that a top-level session link may point into for ReadFile, ListFiles and ZipFiles")
+	flag.Int64Var(&fc.MaxFileBytes, "max-file-bytes", files.GiB, "largest ReadFile, WriteFile or UploadFile")
+	flag.Int64Var(&fc.MaxZipBytes, "max-zip-bytes", files.GiB, "largest total file size of one ZipFiles")
+	captureDirs := flag.String("capture-dirs", strings.Join(files.DefaultCaptureRoots, ","), "comma-separated session directories that CaptureSession saves")
+	captureExclude := flag.String("capture-exclude", strings.Join(files.DefaultCaptureExclude, ","), "comma-separated names that CaptureSession leaves out at any depth")
+	flag.Int64Var(&fc.Limits.StoredBytes, "capture-max-stored-bytes", files.DefaultLimits.StoredBytes, "largest session archive (zstd bytes)")
+	flag.Int64Var(&fc.Limits.ExpandedBytes, "capture-max-expanded-bytes", files.DefaultLimits.ExpandedBytes, "largest total file size of a session archive")
+	flag.Int64Var(&fc.Limits.Entries, "capture-max-entries", files.DefaultLimits.Entries, "most files and directories in a session archive")
 	flag.Parse()
+	fc.ReadLinkRoots = splitList(*readLinks)
+	fc.CaptureRoots = splitList(*captureDirs)
+	fc.CaptureExclude = splitList(*captureExclude)
 
 	var lvl slog.Level
 	if err := lvl.UnmarshalText([]byte(*logLevel)); err != nil {
@@ -62,7 +76,12 @@ func main() {
 	if pf := *relayPIDFile; pf != "" {
 		sys.ResetRelay = func() (bool, error) { return sysops.SignalPIDFile(pf) }
 	}
-	if err := run(log, sys, *port, *listen, *cgroupRoot, *stateFile, *growMounts, execs.Config{
+	fstore, err := files.New(fc)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if err := run(log, sys, fstore, *port, *listen, *cgroupRoot, *stateFile, *growMounts, execs.Config{
 		DefaultDeadline: *defDeadline, MaxDeadline: *maxDeadline, OutputBytes: *outBytes, OutputBudget: *outBudget, MaxRunning: *maxRunning, Log: log,
 	}); err != nil {
 		log.Error("guest-daemon failed", "err", err)
@@ -70,7 +89,18 @@ func main() {
 	}
 }
 
-func run(log *slog.Logger, sys guestd.System, port uint, listen, cgroupRoot, stateFile, growMounts string, ecfg execs.Config) error {
+// splitList splits a comma-separated flag. An empty flag is an empty list.
+func splitList(s string) []string {
+	out := []string{}
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func run(log *slog.Logger, sys guestd.System, fstore *files.Store, port uint, listen, cgroupRoot, stateFile, growMounts string, ecfg execs.Config) error {
 	if cgroupRoot != "" {
 		if err := sysops.EnsureCgroup2(filepath.Dir(cgroupRoot)); err != nil {
 			return fmt.Errorf("mount cgroup2: %w", err)
@@ -103,7 +133,7 @@ func run(log *slog.Logger, sys guestd.System, port uint, listen, cgroupRoot, sta
 			base[k] = v
 		}
 	}
-	srv, err := guestd.NewServer(guestd.Config{Version: version, GrowMounts: mounts, StateFile: stateFile, BaseEnv: base, Log: log}, sys, m)
+	srv, err := guestd.NewServer(guestd.Config{Version: version, GrowMounts: mounts, StateFile: stateFile, BaseEnv: base, Files: fstore, Log: log}, sys, m)
 	if err != nil {
 		return err
 	}
