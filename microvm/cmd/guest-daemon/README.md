@@ -34,7 +34,9 @@ Flags (defaults in brackets): `--port` (52), `--attach-cmd` (`/craft-fc/lib/atta
 `--relay-pidfile` (`/run/craft-fc/egress-relay.pid`; empty to skip), `--cgroup-root`
 (`/sys/fs/cgroup/guestd`), `--state-file`, `--grow-fs` (`/mnt/scratch`), `--default-deadline` (30m),
 `--max-deadline` (24h), `--output-bytes` (4 MiB per stream), `--output-budget` (256 MiB for all
-executions), `--max-running` (64), `--listen`
+executions), `--max-running` (64), the file flags (`--sessions-root`, `--read-link-roots`, `--max-file-bytes`,
+`--max-zip-bytes`, `--capture-dirs`, `--capture-exclude`, `--capture-max-stored-bytes`,
+`--capture-max-expanded-bytes`, `--capture-max-entries`; see Files), `--listen`
 (`unix:<path>` instead of vsock, for tests; mode 0600), `--log-level`. The daemon has no TCP listener:
 the API is plaintext with a bearer key, so it is served only on vsock, through the node agent. The
 container fallback (TCP with mTLS) is not in v1.
@@ -83,7 +85,8 @@ agent, every call also carries `x-sandbox-id`.
 | `Interact` | Writes to (or closes) the stdin of a command started with `stdin: true`. |
 | `Cancel` | Kills the command's cgroup and returns the result (`CANCELED`, or `EXITED` if the command exited first). Not an error. |
 | `Inspect`, `List` | Execution records (state, PID, times, byte counts, result), `List` filtered by labels. |
-| Files, `CaptureSession`, `RestoreSession` | Reserved for ENG-4572. `UNIMPLEMENTED`. |
+| `ReadFile`, `WriteFile`, `UploadFile`, `ListFiles`, `DeleteFile`, `ZipFiles` | Session files (see Files). |
+| `CaptureSession`, `RestoreSession` | Session saves as tar + zstd (see Session saves). |
 | `BrowserStart`, `BrowserStop` | Reserved for ENG-4573. `UNIMPLEMENTED`. |
 
 Commands:
@@ -108,6 +111,42 @@ Commands:
 - A daemon restart loses the records. At start-up the daemon kills every command left in its cgroups
   and removes the cgroups. If that fails, the daemon does not start (init starts it again).
 - Execution IDs come from `crypto/rand`: userspace PRNG state is the same in every clone of a snapshot.
+
+Files (ENG-4572, `internal/guestd/files`):
+
+- Every path is relative to `/workspace/sessions/<session_id>/` (`--sessions-root`). The daemon opens
+  that directory as an `os.Root`: `..`, an absolute path or a symlink that leaves it fails with
+  `INVALID_ARGUMENT`. A leading `/` is dropped. Only `ReadFile`, `ListFiles` and `ZipFiles` follow a
+  top-level session link into `--read-link-roots` (default `/workspace/managed`, for `user_library`).
+- `ReadFile` streams the file info, then 64 KiB chunks. `offset`/`length` read a range. More than
+  `--max-file-bytes` (1 GiB) in one call fails with `LIMIT_EXCEEDED`.
+- `WriteFile` and `UploadFile`: a header with the exact size (at most `--max-file-bytes`) and an optional
+  SHA-256, then data messages (at most 1 MiB each). The daemon writes a temp file in the target
+  directory and renames it only when all bytes arrived and match. `WriteFile` without `overwrite` fails
+  with `FILE_EXISTS`. `UploadFile` is the direct upload call: it stores the file in `attachments/` (or
+  `directory`) under a free name (`a.pdf`, `a_1.pdf`, ...), the same rule as the pod runtime.
+- `ListFiles`: directories first, then by name. `recursive` with `max_depth` (64), `exclude_names`,
+  `skip_hidden`, `max_entries` (10,000, at most 100,000); `truncated` when cut. Links are listed, not
+  followed.
+- `DeleteFile` removes a file or a link (never its target); a directory needs `recursive`.
+- `ZipFiles` streams a deflate zip of the regular files under a directory. It checks
+  `--max-zip-bytes` (1 GiB) and 100,000 files before it sends the first byte.
+
+Session saves:
+
+- `CaptureSession` archives the capture roots `--capture-dirs` (default `outputs,attachments`) of the
+  session as PAX tar + zstd (level 3, all CPUs), and leaves out `--capture-exclude` names at any depth
+  (`node_modules`, `.venv`, `venv`, `__pycache__`, `.next`, caches, ...) and every directory with
+  `pyvenv.cfg`. Symlinks and special files are skipped. The request can set its own roots and exclude
+  list. The last message is the summary with the stream's SHA-256. Limits (A6): 1 GiB stored, 4 GiB of
+  files, 500,000 entries (`--capture-max-*`); a request can only lower them.
+- `RestoreSession` takes a header (exact size, SHA-256, roots, limits), then the archive. It extracts
+  into `.craft-restore-<random>` in the session directory, then checks size and SHA-256 of the whole
+  stream, then swaps each root that the archive has into place. It refuses (`ARCHIVE_INVALID`) absolute
+  names, `..`, unclean names, names outside the roots, links, devices, FIFOs, sparse members and
+  duplicate files, and stops at the limits (`LIMIT_EXCEEDED`) and at a zstd window over 64 MiB. Modes are
+  `& 0777`; the owner is root. On any error the session does not change.
+- A capture and a restore of one session run one at a time.
 
 Errors are gRPC statuses with one `google.rpc.ErrorInfo`: domain `sandboxd.craft.onyx.app`, reason an
 `ErrorReason` name (`KEY_NOT_SET`, `NOT_INITIALIZED`, `UNAUTHENTICATED`, `EXECUTION_NOT_FOUND`, ...).

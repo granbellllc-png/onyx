@@ -38,6 +38,8 @@ type Service struct {
 	MaxDialsPerVM int
 	// Keys installs CreateRequest.sandboxd_key. Nil ignores the key.
 	Keys KeyInstaller
+	// Saves runs the session save calls. Nil turns them off (UNIMPLEMENTED).
+	Saves *Saves
 
 	dialMu sync.Mutex
 	dials  map[string]int

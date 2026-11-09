@@ -29,9 +29,11 @@ import (
 	"github.com/onyx-dot-app/onyx/microvm/internal/apierr"
 	"github.com/onyx-dot-app/onyx/microvm/internal/guestd"
 	"github.com/onyx-dot-app/onyx/microvm/internal/guestd/execs"
+	"github.com/onyx-dot-app/onyx/microvm/internal/guestd/files"
 	"github.com/onyx-dot-app/onyx/microvm/internal/jailer"
 	"github.com/onyx-dot-app/onyx/microvm/internal/template"
 	"github.com/onyx-dot-app/onyx/microvm/internal/testcerts"
+	"github.com/onyx-dot-app/onyx/microvm/internal/transfer"
 	pb "github.com/onyx-dot-app/onyx/microvm/proto/hostagent/v1"
 	sdpb "github.com/onyx-dot-app/onyx/microvm/proto/sandboxd/v1"
 )
@@ -74,6 +76,12 @@ type fakeVM struct {
 
 func startFakeVM(t *testing.T) *fakeVM {
 	t.Helper()
+	return startFakeVMFiles(t, nil)
+}
+
+// startFakeVMFiles starts a fake VM whose daemon serves fs (nil: defaults).
+func startFakeVMFiles(t *testing.T, fs *files.Store) *fakeVM {
+	t.Helper()
 	sock := filepath.Join("/tmp", "pt-"+filepath.Base(t.TempDir())+".sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
@@ -89,7 +97,7 @@ func startFakeVM(t *testing.T) *fakeVM {
 		AddEntropy: func([]byte) (bool, error) { return true, nil },
 		GrowFS:     func(string, uint64) (uint64, uint64, error) { return 0, 0, nil },
 	}
-	d, err := guestd.NewServer(guestd.Config{Version: "test"}, nop, m)
+	d, err := guestd.NewServer(guestd.Config{Version: "test", Files: fs}, nop, m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,11 +141,12 @@ func startFakeVM(t *testing.T) *fakeVM {
 // ptAgent is a node agent with a pass-through and one running VM per
 // sandbox in uds.
 type ptAgent struct {
-	m    *agent.Manager
-	l    *mapLauncher
-	pt   *Passthrough
-	vms  map[string]agent.VM
-	conn *grpc.ClientConn
+	m     *agent.Manager
+	l     *mapLauncher
+	pt    *Passthrough
+	saves *Saves
+	vms   map[string]agent.VM
+	conn  *grpc.ClientConn
 }
 
 type mapLauncher struct {
@@ -221,7 +230,13 @@ func newPTAgent(t *testing.T, mtls bool, uds map[string]string) *ptAgent {
 		target = "unix://" + sock
 		clientCreds = insecure.NewCredentials()
 	}
-	srv := NewServer(&Service{M: m, Keys: pt}, opts...)
+	saves, err := NewSaves(&Saves{M: m, PT: pt, Dir: filepath.Join(dir, "captures"), Log: log,
+		Transfer: &transfer.Client{AllowHTTP: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.saves = saves
+	srv := NewServer(&Service{M: m, Keys: pt, Saves: saves}, opts...)
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(srv.Stop)
 	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(clientCreds))

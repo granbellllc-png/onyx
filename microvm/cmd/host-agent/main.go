@@ -34,6 +34,7 @@ import (
 	"github.com/onyx-dot-app/onyx/microvm/internal/scratch"
 	"github.com/onyx-dot-app/onyx/microvm/internal/server"
 	"github.com/onyx-dot-app/onyx/microvm/internal/template"
+	"github.com/onyx-dot-app/onyx/microvm/internal/transfer"
 )
 
 // version is set with -ldflags "-X main.version=...".
@@ -69,6 +70,10 @@ type flags struct {
 	clientSANs    string
 	dialMax       int
 	daemonPort    uint
+	captureTTL    time.Duration
+	captureMax    int64
+	transferTO    time.Duration
+	transferHTTP  bool
 }
 
 func main() {
@@ -99,6 +104,10 @@ func main() {
 	flag.StringVar(&f.clientSANs, "client-allowed-sans", "", "comma-separated DNS or URI SANs; a client cert must have one (empty: any cert from --client-ca)")
 	flag.IntVar(&f.dialMax, "dial-max-streams", server.DefaultMaxDialsPerVM, "most open Dial streams per VM")
 	flag.UintVar(&f.daemonPort, "daemon-port", server.DefaultDaemonPort, "guest vsock port of the guest daemon (craft.sandboxd.v1.Sandboxd pass-through)")
+	flag.DurationVar(&f.captureTTL, "capture-ttl", server.DefaultCaptureTTL, "delete a spooled session capture that is not uploaded after this long")
+	flag.Int64Var(&f.captureMax, "capture-max-bytes", server.DefaultCaptureMaxBytes, "largest session archive (stored bytes) that CaptureSession spools")
+	flag.DurationVar(&f.transferTO, "transfer-timeout", 10*time.Minute, "limit for one presigned upload or download")
+	flag.BoolVar(&f.transferHTTP, "transfer-allow-http", false, "allow plain http presigned URLs (test object stores only)")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -186,7 +195,16 @@ func run(f flags, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	svc := &server.Service{M: m, DialPorts: ports, DaemonPort: uint32(f.daemonPort), MaxDialsPerVM: f.dialMax, Keys: pt}
+	stats := hostinfo.Stats{DataDir: f.dataDir}
+	saves, err := server.NewSaves(&server.Saves{
+		M: m, PT: pt, Dir: filepath.Join(f.dataDir, "captures"), TTL: f.captureTTL, MaxBytes: f.captureMax,
+		MinFreeBytes: f.minFreeDiskGB * uint64(scratch.GiB), FreeBytes: stats.DiskFreeBytes,
+		Transfer: &transfer.Client{Timeout: f.transferTO, AllowHTTP: f.transferHTTP}, Log: log,
+	})
+	if err != nil {
+		return fmt.Errorf("capture spool: %w", err)
+	}
+	svc := &server.Service{M: m, DialPorts: ports, DaemonPort: uint32(f.daemonPort), MaxDialsPerVM: f.dialMax, Keys: pt, Saves: saves}
 	ln, err := server.ListenUnix(f.socket)
 	if err != nil {
 		return err
