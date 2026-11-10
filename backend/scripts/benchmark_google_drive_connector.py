@@ -138,9 +138,10 @@ def run_benchmark(
     extract_file_text.get_unstructured_api_key = _no_unstructured_api_key  # ty: ignore[invalid-assignment]
 
     if conversion_workers is not None:
-        drive_connector.DRIVE_CONVERSION_WORKERS = conversion_workers  # ty: ignore[invalid-assignment]
+        drive_connector.DRIVE_CONVERSION_WORKERS = conversion_workers
+        drive_connector.DRIVE_CONVERSION_MAX_IN_FLIGHT = 2 * conversion_workers
     if partitions_per_checkpoint is not None:
-        drive_connector.PARTITIONS_PER_CHECKPOINT = partitions_per_checkpoint  # ty: ignore[invalid-assignment]
+        drive_connector.PARTITIONS_PER_CHECKPOINT = partitions_per_checkpoint
 
     client = httpx.Client(base_url=mock_url, timeout=30)
     key = client.get("/_mock/service-account-key").json()
