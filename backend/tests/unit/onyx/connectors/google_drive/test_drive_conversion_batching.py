@@ -6,7 +6,10 @@ from collections.abc import Callable, Iterator
 from typing import cast
 from unittest.mock import MagicMock, patch
 
-from onyx.connectors.google_drive.connector import GoogleDriveConnector
+from onyx.connectors.google_drive.connector import (
+    GoogleDriveConnector,
+    _interleave_by_user,
+)
 from onyx.connectors.google_drive.models import (
     DriveRetrievalStage,
     GoogleDriveCheckpoint,
@@ -318,3 +321,37 @@ def test_skipped_conversions_are_dropped_not_counted() -> None:
         )
 
     assert len(out) == n_files // 2  # only odd-indexed files produced a document
+
+
+def test_interleave_takes_users_in_turn_within_the_lookahead() -> None:
+    files = [_make_file(i) for i in range(6)]
+    for f, user in zip(files, ["a", "a", "a", "b", "b", "c"], strict=True):
+        f.user_email = user
+    pulled = {"count": 0}
+
+    def _listing() -> Iterator[RetrievedDriveFile]:
+        for f in files:
+            pulled["count"] += 1
+            yield f
+
+    interleaved = _interleave_by_user(_listing(), lookahead=4)
+    first = next(interleaved)
+    # Reading stops at the lookahead, not at the end of the listing.
+    assert pulled["count"] == 4
+    order = [first.user_email] + [f.user_email for f in interleaved]
+    assert order == ["a", "b", "a", "b", "c", "a"]
+
+
+def test_interleave_yields_every_file_once_and_keeps_a_users_order() -> None:
+    files = [_make_file(i) for i in range(50)]
+    for index, f in enumerate(files):
+        f.user_email = f"user{index % 7 if index < 30 else 0}"
+
+    out = list(_interleave_by_user(iter(files), lookahead=5))
+
+    assert sorted(f.drive_file["id"] for f in out) == sorted(
+        f.drive_file["id"] for f in files
+    )
+    for user in {f.user_email for f in files}:
+        mine = [f.drive_file["id"] for f in files if f.user_email == user]
+        assert [f.drive_file["id"] for f in out if f.user_email == user] == mine
